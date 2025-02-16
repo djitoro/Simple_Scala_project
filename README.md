@@ -15,7 +15,7 @@ ___
 
   That's what I did: 
   
-  ![tf-idf]()
+  ![table](https://github.com/djitoro/Simple_Scala_project/blob/main/Table_for_Scala.png)
       
       table based on text data
       
