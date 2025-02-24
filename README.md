@@ -1,6 +1,36 @@
 # This is my first Scala project.
-(Further development is possible in the future)
+(V2)
 ___
+
+# What has changed
+(A lot of things)
+
+## New struct: 
+![table](https://github.com/djitoro/Simple_Scala_project/blob/main/Table_for_Scala_2.png)
+
+List of changes: 
+- added information about the request
+- improved separation by dates and
+- taken into account the differences in strucutre different files
+
+## Modified data handling: 
+List of changes: 
+- Added multithreading
+- added resistance to duplicates
+
+## Dealing with anomalies:
+- Empty queries are ignored
+- Technical breakdowns are not taken into account
+- checked the distribution of data
+
+
+Processing one batch and distributed into several batches gave different results, I'll try to figure out why a little later, but for now I'll just add both versions of the code and both answers.
+  
+Multithreaded: 1095
+Single-threaded: 468
+___
+
+
 ## Main steps: 
 
 ### 0. Installing components
