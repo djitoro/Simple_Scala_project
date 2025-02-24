@@ -1,5 +1,4 @@
 package dimai.engineering
-
 import org.apache.spark.sql.{Column, DataFrame, SparkSession, functions => F}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
@@ -8,37 +7,57 @@ object transform_module {
   def buildTable(spark: SparkSession, allLines: Array[String]): DataFrame = {
     import spark.implicits._
 
-    // Создание DataFrame
     val df = spark.createDataFrame(allLines.map(Tuple1(_))).toDF("log")
+    val filteredDF = df.filter(!$"log".rlike("^\\$0"))
 
-    // Извлечение типа события и даты
-    val dfWithEventAndDate = df
+    val dfWithEventAndDate = filteredDF
       .withColumn("event_type", F.regexp_extract($"log", "^(QS|CARD_SEARCH_START|CARD_SEARCH_END|DOC_OPEN|SESSION_START|SESSION_END)", 1))
       .withColumn("date", F.regexp_extract($"log", "(\\d{2}\\.\\d{2}\\.\\d{4}_\\d{2}:\\d{2}:\\d{2})", 1))
 
-    // Извлечение всех идентификаторов документов
     val dfWithDocumentIds = dfWithEventAndDate
       .withColumn("document_ids", F.split(F.regexp_extract($"log", "(\\b[A-Z]+_\\d+\\b.*)", 1), " "))
       .withColumn("document_id", F.explode($"document_ids"))
       .withColumn("is_doc_open", $"event_type" === "DOC_OPEN")
-      .withColumn("search_type",
-        F.when($"event_type" === "QS", "быстрый поиск")
-          .when($"event_type" === "CARD_SEARCH_START", "поиск по карточке")
-          .otherwise(null))
+      .withColumn("search_type", F.when($"event_type" === "QS", "быстрый поиск")
+        .when($"event_type" === "CARD_SEARCH_START", "поиск по карточке")
+        .otherwise(null))
+      .withColumn("search_query", F.when($"event_type" === "QS", F.regexp_extract($"log", "\\{([^}]+)\\}", 1))
+        .when($"event_type" === "CARD_SEARCH_START", F.regexp_extract($"log", "\\$\\d+\\s+(.+)", 1))
+        .otherwise(null))
 
-    // Фильтрация и выбор нужных столбцов
-    val result = dfWithDocumentIds.select("document_id", "date", "search_type", "is_doc_open")
+    val dfWithQuery = dfWithDocumentIds.withColumn("query_temp",
+      when(col("log").rlike("^\\$\\d+"), regexp_extract(col("log"), "^\\$\\d+\\s+(.+)", 1)))
 
-    // Добавляем номера строк
-    val resultWithRowNumbers = result.withColumn("row_number", monotonically_increasing_id())
+    val result = dfWithQuery.select("document_id", "date", "search_type", "is_doc_open", "search_query", "query_temp")
 
-    // Заполнение значений NULL в столбце search_type последним не NULL значением
-    val windowSpec = Window.orderBy("row_number").rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    val filledDF = resultWithRowNumbers.withColumn(
-      "search_type",
-      last($"search_type", ignoreNulls = true).over(windowSpec)
-    )
+    val formattedData = result.withColumn("opening_timestamp", to_timestamp(col("date"), "dd.MM.yyyy_HH:mm:ss"))
+    val dataWithDate = formattedData.withColumn("opening_date", to_date(col("opening_timestamp")))
 
-    filledDF
+    // откидываем лишнее
+    val dataWithDate_use = dataWithDate.select("document_id", "search_type", "is_doc_open", "search_query","query_temp", "opening_date")
+    // добавляем индексы
+    val resultWithRowNumbers = dataWithDate_use.withColumn("row_number", monotonically_increasing_id())
+    // раскидываем дату
+    val sessionWindow = Window.partitionBy("opening_date").orderBy("row_number").rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    val dataWithFixedDate = resultWithRowNumbers.withColumn("opening_date",
+      last(when(col("is_doc_open"), col("opening_date")), ignoreNulls = true).over(sessionWindow))
+    // раскидываем типы и запросы
+    val windowSpec = Window.partitionBy("opening_date").orderBy("row_number").rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    val filledDF = dataWithFixedDate
+      .withColumn("search_type", last($"search_type", ignoreNulls = true).over(windowSpec))
+      .withColumn("search_query", coalesce($"search_query", $"query_temp"))
+      .withColumn("search_query", last($"search_query", ignoreNulls = true).over(windowSpec))
+    // удаляем лишнее (индексы)
+    val dataWithDate_ = filledDF.select("document_id", "search_type", "is_doc_open", "search_query", "opening_date")
+    // меняем пустую строку на null
+    val cleanedDF = dataWithDate_
+      .withColumn("document_id", when(trim(col("document_id")) === "", lit(null)).otherwise(col("document_id")))
+      .withColumn("search_type", when(trim(col("search_type")) === "", lit(null)).otherwise(col("search_type")))
+      .withColumn("search_query", when(trim(col("search_query")) === "", lit(null)).otherwise(col("search_query")))
+      .na.drop(Seq("document_id"))
+      .distinct()
+    // репартиционирование финального дф
+    val partitionedDF = cleanedDF.repartition($"opening_date")
+    partitionedDF
   }
 }
